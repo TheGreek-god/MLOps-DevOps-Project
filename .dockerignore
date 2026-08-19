@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.dvc/
+cache_folder/
+src/training/
+src/dataprep/
+src/trial.ipynb
+src/trial.py
+f1net-frontend/node_modules/
+f1net-frontend/dist/
+*.log
+.env

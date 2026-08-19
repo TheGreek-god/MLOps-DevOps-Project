@@ -1,0 +1,15 @@
+mlflow
+dagshub
+fastf1
+tqdm
+dvc
+hyperopt
+fastapi
+uvicorn
+pydantic
+httpx
+python-dotenv
+scipy
+numpy
+pandas
+scikit-learn

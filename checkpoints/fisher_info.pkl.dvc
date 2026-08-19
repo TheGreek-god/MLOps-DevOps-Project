@@ -1,0 +1,5 @@
+outs:
+- md5: 1ac4f699457fff906a9c7479eb178f2f
+  size: 98448
+  hash: md5
+  path: fisher_info.pkl

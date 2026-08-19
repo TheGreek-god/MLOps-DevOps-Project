@@ -1,0 +1,6 @@
+outs:
+- md5: 467cf7a9b44373f41006027881cd255d
+  size: 100599
+  hash: md5
+  path: f1net_main.pth
+  isexec: true

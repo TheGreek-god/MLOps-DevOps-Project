@@ -1,0 +1,13 @@
+/venv
+**/__pycache__/
+
+/cache_folder
+src/trial.py
+src/trial.ipynb
+checkpoints/*.pth
+checkpoints/*.pkl
+*.csv
+*.pyc
+.env
+.env.docker
+*.render.Dockerfile

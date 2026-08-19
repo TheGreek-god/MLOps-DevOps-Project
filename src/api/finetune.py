@@ -1,0 +1,289 @@
+import torch
+import torch.nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import pickle
+import os
+import sys
+import json
+from fastapi import FastAPI,BackgroundTasks,HTTPException
+from dotenv import load_dotenv
+from fastapi.security import APIKeyHeader
+from fastapi import Security
+import io
+load_dotenv()
+
+
+
+class CPU_Unpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module == 'torch.storage' and name == '_load_from_bytes':
+            return lambda b: torch.load(io.BytesIO(b), map_location='cpu')
+        return super().find_class(module, name)
+
+def find_project_root():
+    current = os.path.dirname(os.path.abspath(__file__))
+    while current != os.path.dirname(current):
+        if os.path.exists(os.path.join(current, "requirements.txt")):
+            return current
+        current = os.path.dirname(current)
+    raise FileNotFoundError("Could not find project root")
+
+root_path = find_project_root()
+src_path = os.path.join(root_path,"src")
+if(root_path not in sys.path):
+    sys.path.insert(0,root_path)
+if(src_path not in sys.path):
+    sys.path.insert(0,src_path)
+
+from models.F1Net import F1Net
+from models.F1Loss import F1Loss
+from utils.dataLoader import F1NetDataset,collate
+import mlflow
+import dagshub
+import numpy as np
+from scipy.stats import spearmanr
+import uuid
+import subprocess
+
+github_token = os.getenv("GITHUB_TOKEN")
+github_user = os.getenv("GITHUB_USER")
+if github_token:
+    subprocess.run(["git", "config", "--global", "user.email", "pranav070904@users.noreply.github.com"], cwd=root_path)
+    subprocess.run(["git", "config", "--global", "user.name", "pranav070904"], cwd=root_path)
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", 
+         f"https://{github_user}:{github_token}@github.com/{github_user}/F1Net-V2.git"],
+        cwd=root_path, capture_output=True
+    )
+
+API_KEY = os.getenv("ADMIN_API_KEY")
+api_key_header = APIKeyHeader(name="X-API-KEY")
+MAPPINGS_PATH = os.path.join(root_path,"config","mappings.json")
+MODELS_CHECKPOINT = os.path.join(root_path,"checkpoints","f1net_main.pth")
+FISHER_PATH = os.path.join(root_path,"checkpoints","fisher_info.pkl")
+
+
+job_store : dict[str,dict] = {}
+
+
+def verify_key(key: str = Security(api_key_header)):
+    if key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+def _set_status(job_id:str,**kwargs):
+    job_store[job_id].update(kwargs)
+    print(f"[Job {job_id[:8]}] {kwargs.get('message', kwargs.get('status', ''))}")
+
+
+def _sub_run(job_id: str):
+    dvc = subprocess.run(
+        ["dvc", "add", MODELS_CHECKPOINT],
+        capture_output=True, text=True, cwd=root_path,
+    )
+    git_add = subprocess.run(
+        ["git", "add", f"{MODELS_CHECKPOINT}.dvc"],
+        capture_output=True, text=True, cwd=root_path
+    )
+    git_commit = subprocess.run(
+        ["git", "commit", "-m", "finetune: post-race model update"],
+        capture_output=True, text=True, cwd=root_path
+    )
+    git_push = subprocess.run(
+        ["git", "push", "origin", "main"],
+        capture_output=True, text=True, cwd=root_path
+    )
+    dvc_push = subprocess.run(
+        ["dvc", "push"],
+        capture_output=True, text=True, cwd=root_path
+    )
+    _set_status(job_id, dvc_output=(dvc.stdout + dvc.stderr).strip())
+    _set_status(job_id, git_add_output=(git_add.stdout + git_add.stderr).strip())
+    _set_status(job_id, git_commit_output=(git_commit.stdout + git_commit.stderr).strip())
+    _set_status(job_id, git_push_output=(git_push.stdout + git_push.stderr).strip())
+    if dvc_push.returncode != 0:
+        _set_status(job_id, dvc_push_warning=f"DVC push failed: {dvc_push.stderr.strip()}")
+    else:
+        _set_status(job_id, message="DVC push complete.")
+def EWC(model, fixed_params, fisher_mat):
+    l = 0
+    for name, param in model.named_parameters():
+        if name not in fisher_mat:
+            print(f"Missing from fisher_mat: {name}")
+            continue
+        if name not in fixed_params:
+            print(f"Missing from fixed_params: {name}")
+            continue
+        l += (fisher_mat[name] * (param - fixed_params[name]).pow(2)).sum()
+    return l
+
+def calc_spearman(model, test_loader, mappings, device, num_races_to_calc=3):
+    model.eval()
+    id_to_driver = {v: k for k, v in mappings["drivers"].items()}
+    id_to_driver[0] = "ROOKIE_BASELINE"  
+    corrs = []
+    with torch.no_grad():
+        for idx,batch in enumerate(test_loader):
+            if idx >= num_races_to_calc:
+                break
+
+            d_ids = batch["driver_id"][0].to(device)
+            t_ids = batch["team_id"][0].to(device)
+            n_feat = batch["numeric_feat"][0].to(device)
+            y_true = batch["targets"][0].cpu().tolist()
+            
+            predictions = model(n_feat, t_ids, d_ids).squeeze(-1).cpu().tolist()
+                
+            
+            driver_names = [id_to_driver.get(int(d_id.item()), "UNKNOWN") for d_id in d_ids]
+            
+            race_grid = []
+            for name, true_pos, pred_score in zip(driver_names, y_true, predictions):
+                race_grid.append({
+                    "name": name,
+                    "true_pos": int(true_pos),
+                    "pred_score": pred_score
+                })
+            
+            
+            predicted_order = sorted(race_grid, key=lambda x: x["pred_score"],reverse=True)
+            actual_order = sorted(race_grid, key=lambda x: x["true_pos"],reverse=True)
+
+            true_ranks = [x["true_pos"] for x in race_grid]
+            predicted_scores = [x["pred_score"] for x in race_grid]
+
+            
+            corr,_ = spearmanr(predicted_scores,true_ranks)
+
+            if not np.isnan(corr):
+                corrs.append(corr)
+
+
+    return sum(corrs)/len(corrs)
+
+
+
+def finetune(job_id:str):
+    try:
+        _set_status(job_id, status="running", message="Starting finetune...")
+        dagshub.auth.add_app_token(token=os.getenv("DAGSHUB_TOKEN"))
+        dagshub.init(repo_owner='pranav070904', repo_name='F1Net-V2', mlflow=True)
+        mlflow.set_experiment("F1Net_Finetune")
+
+        _set_status(job_id, message="Loading checkpoint and mappings...")
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        checkpoint = torch.load(MODELS_CHECKPOINT,map_location = device)
+        
+        
+        with open(MAPPINGS_PATH,"r") as f:
+            mappings = json.load(f)
+        num_drivers = len(mappings['drivers'])
+        num_teams = len(mappings["teams"])
+
+        _set_status(job_id, message="Loading fisher matrix...")
+        with open(FISHER_PATH,"rb") as f:
+            fisher_mat = CPU_Unpickler(f).load()
+
+        _set_status(job_id, message="Loading Model")
+        model = F1Net(num_teams = num_teams,num_drivers=num_drivers)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.to(device)
+
+        _set_status(job_id, message="Building dataset and dataloader...")
+        dataset = F1NetDataset(group = "2026")
+        window_size = 6
+        start = max(0,len(dataset)-window_size)
+        final_ds = [dataset[i] for i in range(start,len(dataset))]
+        dl = DataLoader(final_ds,batch_size=1,shuffle=False,collate_fn=collate)
+
+        losfn = F1Loss()
+        optimizer = torch.optim.Adam(model.parameters(),lr = .003)
+
+        pre_corrs = calc_spearman(model,dl,mappings,device,num_races_to_calc=window_size)
+
+        fixed_params = {}
+        for name,param in model.named_parameters():
+            fixed_params[name] = param.detach().clone()
+        lam = 10
+
+        _set_status(job_id, message="Starting training loop...")
+        with mlflow.start_run(run_name = "F1Net_Finetune_run"):
+
+
+            EPOCHS = 10
+            for epoch in range(EPOCHS):
+                
+                for batch in dl:
+                    model.train()
+                    d_id = batch["driver_id"][0].to(device)
+                    t_id = batch["team_id"][0].to(device)
+                    n_feat = batch["numeric_feat"][0].to(device)
+                    y_true = batch["targets"][0].to(device)
+
+                    preds = model(n_feat,t_id,d_id)
+                    loss = losfn([preds],[y_true])
+                    full_loss = loss + (lam/2)*EWC(model,fixed_params,fisher_mat)
+                    optimizer.zero_grad()
+                    full_loss.backward()
+                    optimizer.step()
+
+            
+
+            
+
+            _set_status(job_id, message="Logging metrics")
+            post_corrs = calc_spearman(model,dl,mappings,device,num_races_to_calc=window_size)
+            mlflow.log_metric("Pre_Spearman_Corr",pre_corrs)
+            mlflow.log_metric("Post_Spearman_Corr",post_corrs)
+            mlflow.log_param("EWC_Lam",lam)
+            mlflow.log_artifact(MAPPINGS_PATH,artifact_path = "model_metadata")
+            mlflow.log_artifact(FISHER_PATH,artifact_path="model_metadata")
+            mlflow.pytorch.log_model(
+                pytorch_model=model,
+                name = "f1net_model",
+                registered_model_name="F1NET"
+            )
+
+            client = mlflow.MlflowClient()
+            latest_version = client.get_latest_versions("F1NET")[-1].version
+            client.set_registered_model_alias("F1NET", "latest", version=latest_version)
+
+
+            state_payload = {
+                'model_state_dict': model.state_dict(),
+                'mappings':mappings,
+            }
+            torch.save(state_payload,MODELS_CHECKPOINT)
+            _set_status(job_id, message="Checkpoint Saved and model logged")
+            _sub_run(job_id)
+            _set_status(job_id, status="done", message="Finetune complete.")
+    except Exception as e:
+        _set_status(job_id, status="error", message=str(e))
+
+
+
+
+
+app = FastAPI(
+    title = "Finetune model API",
+    description="Finetunes the model on the last couple of races"
+
+)
+
+
+
+
+@app.post("/finetune")
+def finetune_endpoint(background_tasks:  BackgroundTasks,_=Security(verify_key)):
+    job_id = str(uuid.uuid4())
+    job_store[job_id] = {"status":"queued","message":"Job Queued"}
+    background_tasks.add_task(finetune,job_id)
+    return {"job_id":job_id,"status":"queued"}
+
+@app.get("/finetune/status/{job_id}")
+def finetune_status(job_id: str):
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
