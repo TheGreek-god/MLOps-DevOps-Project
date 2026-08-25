@@ -1,0 +1,43 @@
+stages:
+  prepare_data:
+    cmd: python scripts/prepare_data.py
+    deps:
+      - scripts/prepare_data.py
+    params:
+      - prepare
+    outs:
+      - data/Complete_Driver_Data.csv:
+          persist: true
+
+  train:
+    cmd: python src/training/train.py
+    deps:
+      - src/training/train.py
+      - src/models/F1Net.py
+      - src/models/F1Loss.py
+      - src/utils/dataLoader.py
+      - data/Complete_Driver_Data.csv
+      - config/mappings.json
+    params:
+      - train
+    outs:
+      - checkpoints/f1net_main.pth:
+          persist: true
+      - checkpoints/fisher_info.pkl:
+          persist: true
+
+  evaluate:
+    cmd: python scripts/evaluate.py
+    deps:
+      - scripts/evaluate.py
+      - src/models/F1Net.py
+      - src/models/F1Loss.py
+      - src/utils/dataLoader.py
+      - checkpoints/f1net_main.pth
+      - data/Complete_Driver_Data.csv
+      - config/mappings.json
+    params:
+      - evaluate
+    metrics:
+      - metrics.json:
+          cache: false

@@ -16,3 +16,4 @@ scikit-learn
 prometheus-client
 prometheus-fastapi-instrumentator
 structlog
+pyyaml

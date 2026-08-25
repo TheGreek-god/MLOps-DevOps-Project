@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 import os
 import json
 import sys
+import yaml
 from hyperopt import STATUS_OK,Trials,fmin,hp,tpe
 import mlflow
 import dagshub
@@ -19,7 +20,11 @@ project_root = os.path.dirname(src_path)
 mappings_path = os.path.join(project_root, "config", "mappings.json")
 checkpoint_dir = os.path.join(project_root, "checkpoints", "f1net_main.pth")
 fisher_dir = os.path.join(project_root, "checkpoints", "fisher_info.pkl")
+metrics_path = os.path.join(project_root, "metrics.json")
+params_path = os.path.join(project_root, "params.yaml")
 
+with open(params_path) as f:
+    params = yaml.safe_load(f)
 
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
@@ -135,7 +140,7 @@ def train_stage_2(model,loader,lossfn,device,epochs,lr,mappings):
     driver_count = len(mappings['drivers'])
     team_count = len(mappings['teams'])
     arvid_id = mappings['drivers']["Arvid Lindblad"]
-    cadillac_id = mappings['teams']["Cadillac"]
+    cadillac_id = mappings['teams']["Cadillac F1 Team"]
 
 
     model.driver_embedding.weight.data[arvid_id] = model.driver_embedding.weight.data[0].clone()
@@ -167,7 +172,7 @@ def train_stage_2(model,loader,lossfn,device,epochs,lr,mappings):
 
             if(model.driver_embedding.weight.grad is not None):
                 grad_mask = torch.zeros_like(model.driver_embedding.weight.grad)
-                grad_mask[2] = 1.0
+                grad_mask[arvid_id] = 1.0
                 model.driver_embedding.weight.grad *= grad_mask
             
             if(model.team_embedding.weight.grad is not None):
@@ -181,9 +186,12 @@ def train_stage_2(model,loader,lossfn,device,epochs,lr,mappings):
 
         print(f"Epoch [{epoch+1:02d}/{epochs} | Train Loss: {avg_batch_train_loss:.4f}]")
     
-    mlflow.log_metric(
-        'finetune_train_loss',sum(total_train_losses)/len(total_train_losses)
-    )
+    try:
+        mlflow.log_metric(
+            'finetune_train_loss',sum(total_train_losses)/len(total_train_losses)
+        )
+    except Exception:
+        pass
 
     return model
         
@@ -202,12 +210,13 @@ def train_model():
     teams = len(mappings['teams'].keys())
 
 
-    EPOCHS_P1 = 25 #pretraining
-    EPOCHS_P2 = 25 #finetuning
-    LR_P1 = .001
-    LR_P2 = .003
+    train_params = params["train"]
+    EPOCHS_P1 = train_params["pretrain_epochs"]
+    EPOCHS_P2 = train_params["finetune_epochs"]
+    LR_P1 = train_params["lr_pretrain"]
+    LR_P2 = train_params["lr_finetune"]
 
-    model = F1Net(num_teams=teams,num_drivers=drivers)
+    model = F1Net(num_teams=teams, num_drivers=drivers, embedding_dim=train_params["embedding_dim"])
     lossfn = F1Loss()
     optimizer = torch.optim.Adam(model.parameters(),lr = LR_P1)
 
@@ -216,7 +225,7 @@ def train_model():
 
     model.to(device)
 
-    train_Loader =  DataLoader(train_set,batch_size = 4,shuffle = False,collate_fn=collate)
+    train_Loader =  DataLoader(train_set,batch_size = train_params["batch_size"],shuffle = False,collate_fn=collate)
     test_Loader = DataLoader(test_set,batch_size = 1,shuffle = False,collate_fn=collate)
     loader_2026 = DataLoader(ds26,batch_size = 1,shuffle = False,collate_fn=collate)
 
@@ -281,27 +290,30 @@ def train_model():
     avg_cor = print_race_ranking_comparison(model, test_Loader, mappings, device, num_races_to_show=2)
     avg_train_loss = sum(total_train_losses)/len(total_train_losses)
     avg_test_loss = sum(total_val_losses)/len(total_val_losses)
-    mlflow.log_metric(
-        "avg_spearman_corr",avg_cor
-    )
-    mlflow.log_metric(
-        'train_loss',avg_train_loss
-    )
-    mlflow.log_metric(
-        'test_loss',avg_test_loss
-    )
+    try:
+        mlflow.log_metric("avg_spearman_corr", avg_cor)
+        mlflow.log_metric('train_loss', avg_train_loss)
+        mlflow.log_metric('test_loss', avg_test_loss)
+    except Exception:
+        pass
     
     
     model = train_stage_2(model,loader_2026,lossfn,device,epochs = EPOCHS_P2,lr = LR_P2,mappings = mappings)
     avg_cor_2026 = print_race_ranking_comparison(model, loader_2026, mappings, device, num_races_to_show=6)
-    mlflow.log_metric(
-        "avg_spearman_corr_2026",avg_cor_2026
-
-    )
+    try:
+        mlflow.log_metric("avg_spearman_corr_2026", avg_cor_2026)
+    except Exception:
+        pass
 
     fisher = calculate_fisher(model,loader_2026,device,lossfn)
 
-    return model,mappings,fisher
+    metrics = {
+        "avg_cor": avg_cor,
+        "avg_cor_2026": avg_cor_2026,
+        "total_train_losses": total_train_losses,
+        "total_val_losses": total_val_losses,
+    }
+    return model,mappings,fisher,metrics
 
 
 
@@ -318,55 +330,67 @@ def train_model():
     
 
 if __name__ == "__main__":
-    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
-    if os.getenv("DAGSHUB_TOKEN"):
-        dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
-    mlflow.set_experiment("F1Net_Fisher")
+    use_mlflow = False
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    dagshub_token = os.getenv("DAGSHUB_TOKEN")
 
-    # space = {
-    #     'temperature': hp.uniform('temperature', 0.5, 10.0)
-    # }
-    # trials = Trials()
-    # tpe_algo = partial(
-    #     tpe.suggest,
-    #     n_startup_jobs = 8,
-    #     gamma = 0.25
-    # )
-    # best = fmin(
-    #     fn = objective,
-    #     space = space,
-    #     algo = tpe_algo,
-    #     max_evals = 20,
-    #     trials = trials
-    # )
-    # print(f"Best param selection index: {best}")
+    if tracking_uri:
+        try:
+            mlflow.set_tracking_uri(tracking_uri)
+            if dagshub_token:
+                dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
+            mlflow.set_experiment("F1Net_Fisher")
+            use_mlflow = True
+            print(f"MLflow enabled: {tracking_uri}")
+        except Exception as e:
+            print(f"WARNING: MLflow setup failed ({e}). Running without MLflow.")
 
-    with mlflow.start_run(run_name="F1Net_with_Fisher_Gen"):
-        model,mappings,fisher = train_model()
+    if use_mlflow:
+        with mlflow.start_run(run_name="F1Net_with_Fisher_Gen"):
+            model, mappings, fisher, train_metrics = train_model()
+            state_payload = {
+                'model_state_dict': model.state_dict(),
+                'mappings': mappings,
+            }
+            torch.save(state_payload, checkpoint_dir)
+            print(f"\nModel checkpoint saved to: {checkpoint_dir}")
+            with open(fisher_dir, "wb") as f:
+                pickle.dump(fisher, f)
+            print(f"Fisher saved to: {fisher_dir}")
+
+            mlflow.log_artifact(mappings_path, artifact_path="model_metadata")
+            mlflow.log_artifact(fisher_dir, artifact_path="model_metadata")
+            mlflow.pytorch.log_model(
+                pytorch_model=model,
+                name="f1net_model",
+                registered_model_name="F1NET",
+            )
+            print("\nModel logged to MLflow")
+    else:
+        print("Running without MLflow (DVC pipeline mode)")
+        model, mappings, fisher, train_metrics = train_model()
         state_payload = {
             'model_state_dict': model.state_dict(),
-            'mappings':mappings,
+            'mappings': mappings,
         }
+        torch.save(state_payload, checkpoint_dir)
+        print(f"\nModel checkpoint saved to: {checkpoint_dir}")
+        with open(fisher_dir, "wb") as f:
+            pickle.dump(fisher, f)
+        print(f"Fisher saved to: {fisher_dir}")
 
-        torch.save(state_payload,checkpoint_dir)
-        print(f"\nModel checkpoint saved to :{checkpoint_dir}")
-        with open(fisher_dir,"wb") as f:
-            pickle.dump(fisher,f)
-   
+    total_train_losses = train_metrics["total_train_losses"]
+    total_val_losses = train_metrics["total_val_losses"]
+    mlflow_metrics = {
+        "train_loss": float(total_train_losses[-1]) if total_train_losses else 0,
+        "test_loss": float(total_val_losses[-1]) if total_val_losses else 0,
+        "avg_spearman_corr": float(train_metrics["avg_cor"]),
+        "avg_spearman_corr_2026": float(train_metrics["avg_cor_2026"]),
+        "finetune_train_loss": float(sum(total_train_losses)/len(total_train_losses)) if total_train_losses else 0,
+    }
+    with open(metrics_path, "w") as f:
+        json.dump(mlflow_metrics, f, indent=2)
+    print(f"Metrics saved: {metrics_path}")
 
-        
-
-
-        mlflow.log_artifact(mappings_path, artifact_path="model_metadata")
-        mlflow.log_artifact(fisher_dir,artifact_path = "model_metadata")
-
-        mlflow.pytorch.log_model(
-            pytorch_model=model,
-            name="f1net_model",
-            registered_model_name="F1NET"
-
-        )
-
-        print("\nModel Logged and Saved")
 
 

@@ -1,0 +1,23 @@
+prepare:
+  team_replacements:
+    "Kick Sauber": "Audi"
+  driver_replacements:
+    "Andrea Kimi Antonelli": "Kimi Antonelli"
+  time_cols:
+    - AvgFPTime
+    - QualyTime
+    - QualTimeDelta
+
+train:
+  pretrain_epochs: 25
+  finetune_epochs: 25
+  lr_pretrain: 0.001
+  lr_finetune: 0.003
+  batch_size: 4
+  embedding_dim: 16
+  dropout: 0.25
+  device: "cpu"
+
+evaluate:
+  num_test_races: 3
+  num_2026_races: 6

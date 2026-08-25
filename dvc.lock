@@ -1,0 +1,113 @@
+schema: '2.0'
+stages:
+  prepare_data:
+    cmd: python scripts/prepare_data.py
+    deps:
+    - path: scripts/prepare_data.py
+      hash: md5
+      md5: 8c593d0b2a10c74e0306fae032d13b62
+      size: 3705
+    params:
+      params.yaml:
+        prepare:
+          team_replacements:
+            Kick Sauber: Audi
+          driver_replacements:
+            Andrea Kimi Antonelli: Kimi Antonelli
+          time_cols:
+          - AvgFPTime
+          - QualyTime
+          - QualTimeDelta
+    outs:
+    - path: data/Complete_Driver_Data.csv
+      hash: md5
+      md5: c2059a475e57097c6d97db14b3577d31
+      size: 17464
+  train:
+    cmd: python src/training/train.py
+    deps:
+    - path: config/mappings.json
+      hash: md5
+      md5: 3ecb728f8c097154cee76f9ec2278415
+      size: 1536
+    - path: data/Complete_Driver_Data.csv
+      hash: md5
+      md5: c2059a475e57097c6d97db14b3577d31
+      size: 17464
+    - path: src/models/F1Loss.py
+      hash: md5
+      md5: 7e625f24b7fc112252998cb4d65c36bb
+      size: 821
+    - path: src/models/F1Net.py
+      hash: md5
+      md5: 981e69ceb28187524df2457b7f55359b
+      size: 895
+    - path: src/training/train.py
+      hash: md5
+      md5: 9b0d0ed5ba20e0bdb759f348df9dba5c
+      size: 14474
+    - path: src/utils/dataLoader.py
+      hash: md5
+      md5: cf87fc9f25208f05672778cf819b690b
+      size: 4472
+    params:
+      params.yaml:
+        train:
+          pretrain_epochs: 25
+          finetune_epochs: 25
+          lr_pretrain: 0.001
+          lr_finetune: 0.003
+          batch_size: 4
+          embedding_dim: 16
+          dropout: 0.25
+          device: cpu
+    outs:
+    - path: checkpoints/f1net_main.pth
+      hash: md5
+      md5: 75f05adaffc11246f384530a8633160a
+      size: 101303
+    - path: checkpoints/fisher_info.pkl
+      hash: md5
+      md5: 7e6afb84c10cf906e87670fc991a4907
+      size: 98997
+  evaluate:
+    cmd: python scripts/evaluate.py
+    deps:
+    - path: checkpoints/f1net_main.pth
+      hash: md5
+      md5: 75f05adaffc11246f384530a8633160a
+      size: 101303
+    - path: config/mappings.json
+      hash: md5
+      md5: 3ecb728f8c097154cee76f9ec2278415
+      size: 1536
+    - path: data/Complete_Driver_Data.csv
+      hash: md5
+      md5: c2059a475e57097c6d97db14b3577d31
+      size: 17464
+    - path: scripts/evaluate.py
+      hash: md5
+      md5: 98e45e7ce3830bb0f8171da307e3b6dd
+      size: 3907
+    - path: src/models/F1Loss.py
+      hash: md5
+      md5: 7e625f24b7fc112252998cb4d65c36bb
+      size: 821
+    - path: src/models/F1Net.py
+      hash: md5
+      md5: 981e69ceb28187524df2457b7f55359b
+      size: 895
+    - path: src/utils/dataLoader.py
+      hash: md5
+      md5: cf87fc9f25208f05672778cf819b690b
+      size: 4472
+    params:
+      params.yaml:
+        evaluate:
+          num_test_races: 3
+          num_2026_races: 6
+    outs:
+    - path: metrics.json
+      hash: md5
+      md5: 372a77b3f4f3c72283a5dda2063ca7aa
+      size: 238

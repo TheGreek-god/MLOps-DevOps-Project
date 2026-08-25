@@ -1,0 +1,9 @@
+{
+  "test_spearman_corr": 0.4744,
+  "test_loss": 0.5718,
+  "spearman_corr_2026": 0.5404,
+  "loss_2026": 0.1831,
+  "model_drivers": 34,
+  "model_teams": 17,
+  "checkpoint": "C:\\Users\\myvm\\F1Net-V2\\checkpoints\\f1net_main.pth"
+}
