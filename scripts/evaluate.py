@@ -1,7 +1,7 @@
 """
-DVC pipeline stage: evaluate
+Model evaluation script.
 Loads trained checkpoint and computes Spearman correlation on test + 2026 data.
-Saves results to metrics.json for DVC tracking.
+Saves results to metrics.json for tracking.
 """
 import os
 import sys

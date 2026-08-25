@@ -1,10 +1,10 @@
 import fastf1
 import logging
 import os
-import subprocess
 import sys
 import time
 import uuid
+import datetime
 
 logging.getLogger("fastf1").setLevel(logging.WARNING)
 from dotenv import load_dotenv
@@ -14,7 +14,16 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
+import structlog
 load_dotenv()
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+)
+log = structlog.get_logger("ingest")
 
 
 def find_project_root():
@@ -30,16 +39,10 @@ root_path = find_project_root()
 sys.path.insert(0, os.path.join(root_path, "src"))
 
 from utils.prep_data import clean_single_race_production, normalize_names, recompute_rolling_avg, update_mappings
-github_token = os.getenv("GITHUB_TOKEN")
-github_user = os.getenv("GITHUB_USER")
-if github_token:
-    subprocess.run(["git", "config", "--global", "user.email", "pranav070904@users.noreply.github.com"], cwd=root_path)
-    subprocess.run(["git", "config", "--global", "user.name", "pranav070904"], cwd=root_path)
-    subprocess.run(
-        ["git", "remote", "set-url", "origin", 
-         f"https://{github_user}:{github_token}@github.com/{github_user}/F1Net-V2.git"],
-        cwd=root_path, capture_output=True
-    )
+from utils.metrics import (
+    setup_metrics, INGEST_JOBS_TOTAL, INGEST_ROWS_ADDED,
+    INGEST_DURATION_SECONDS, MODEL_LOADED,
+)
 
 FINETUNE_URL = os.getenv("FINETUNE_API_URL", "http://localhost:8002/finetune")
 CACHE_FOLDER = os.path.join(root_path, "cache_folder")
@@ -51,6 +54,7 @@ os.makedirs(CACHE_FOLDER, exist_ok=True)
 fastf1.Cache.enable_cache(CACHE_FOLDER)
 
 job_store: dict[str, dict] = {}
+START_TIME = datetime.datetime.now(datetime.timezone.utc)
 
 def verify_key(key: str = Security(api_key_header)):
     if key != API_KEY:
@@ -58,42 +62,15 @@ def verify_key(key: str = Security(api_key_header)):
 
 def _set_status(job_id: str, **kwargs):
     job_store[job_id].update(kwargs)
-    print(f"[Job {job_id[:8]}] {kwargs.get('message', kwargs.get('status', ''))}")
+    msg = kwargs.get('message', kwargs.get('status', ''))
+    log.info("job_status", job_id=job_id[:8], **{k: v for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))})
 
-
-def _dvc_add(job_id: str):
-    dvc = subprocess.run(
-        ["dvc", "add", DATA_PATH],
-        capture_output=True, text=True, cwd=root_path,
-    )
-    git_add = subprocess.run(
-        ["git", "add", f"{DATA_PATH}.dvc"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    git_commit = subprocess.run(
-        ["git", "commit", "-m", "ingest: dataset update"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    git_push = subprocess.run(
-        ["git", "push", "origin", "main"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    dvc_push = subprocess.run(
-        ["dvc", "push"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    _set_status(job_id, dvc_add_output=(dvc.stdout + dvc.stderr).strip())
-    _set_status(job_id, git_add_output=(git_add.stdout + git_add.stderr).strip())
-    _set_status(job_id, git_commit_output=(git_commit.stdout + git_commit.stderr).strip())
-    _set_status(job_id, git_push_output=(git_push.stdout + git_push.stderr).strip())
-    if dvc_push.returncode != 0:
-        _set_status(job_id, dvc_push_warning=f"DVC push failed: {dvc_push.stderr.strip()}")
-    else:
-        _set_status(job_id, message="DVC push complete.")
 
 
 def fetch_and_process(year: int, round_num: int, job_id: str):
+    start = time.time()
     _set_status(job_id, status="running", message="Loading Qualifying session...")
+    log.info("ingest_started", job_id=job_id[:8], year=year, round=round_num)
     try:
         sessionQ = fastf1.get_session(year, round_num, "Q")
         sessionQ.load()
@@ -171,6 +148,7 @@ def fetch_and_process(year: int, round_num: int, job_id: str):
         master_df = pd.read_csv(DATA_PATH)
         if ((master_df["Year"] == year) & (master_df["Round"] == round_num)).any():
             _set_status(job_id, status="error", message=f"Year {year} Round {round_num} already exists. Use /ingest/finish to fill missing results.")
+            INGEST_JOBS_TOTAL.labels(status="error").inc()
             return
 
         new_drivers, new_teams = update_mappings(new_df, MAPPINGS_PATH)
@@ -178,10 +156,12 @@ def fetch_and_process(year: int, round_num: int, job_id: str):
         _set_status(job_id, message="Appending data and recomputing rolling averages...")
         master_df = recompute_rolling_avg(normalize_names(pd.concat([master_df, new_df], ignore_index=True)))
         master_df.to_csv(DATA_PATH, index=False)
-        print("New Data Added")
-        _set_status(job_id, message="Updating DVC tracking...")
-        _dvc_add(job_id)
+        INGEST_ROWS_ADDED.inc(len(new_df))
+        log.info("data_appended", job_id=job_id[:8], rows=len(new_df))
 
+        elapsed = time.time() - start
+        INGEST_DURATION_SECONDS.observe(elapsed)
+        INGEST_JOBS_TOTAL.labels(status="success").inc()
         _set_status(
             job_id,
             status="done",
@@ -191,13 +171,18 @@ def fetch_and_process(year: int, round_num: int, job_id: str):
             new_drivers=new_drivers,
             new_teams=new_teams,
         )
+        log.info("ingest_complete", job_id=job_id[:8], rows=len(new_df), elapsed=round(elapsed, 2))
 
     except Exception as e:
+        INGEST_JOBS_TOTAL.labels(status="error").inc()
+        log.error("ingest_failed", job_id=job_id[:8], error=str(e))
         _set_status(job_id, status="error", message=str(e))
 
 
 def fill_finish_positions(year: int, round_num: int, job_id: str):
+    start = time.time()
     _set_status(job_id, status="running", message="Loading Race session...")
+    log.info("finish_started", job_id=job_id[:8], year=year, round=round_num)
     try:
         sessionR = fastf1.get_session(year, round_num, "R")
         sessionR.load()
@@ -206,12 +191,12 @@ def fill_finish_positions(year: int, round_num: int, job_id: str):
         round_mask = (master_df["Year"] == year) & (master_df["Round"] == round_num)
         if not round_mask.any():
             _set_status(job_id, status="error", message=f"No rows found for Year {year} Round {round_num}. Run /ingest first.")
+            INGEST_JOBS_TOTAL.labels(status="error").inc()
             return
 
         results = sessionR.results
         for _, row in results.iterrows():
             driver_name = row["FullName"]
-            # Apply same normalization used during ingest so names match
             normalized = normalize_names(pd.DataFrame([{"Driver": driver_name, "Team": row["TeamName"]}]))
             driver_name = normalized.iloc[0]["Driver"]
 
@@ -226,28 +211,34 @@ def fill_finish_positions(year: int, round_num: int, job_id: str):
         master_df = recompute_rolling_avg(master_df)
         master_df.to_csv(DATA_PATH, index=False)
 
-        _set_status(job_id, message="Updating DVC tracking...")
-        _dvc_add(job_id)
-
+        elapsed = time.time() - start
+        INGEST_DURATION_SECONDS.observe(elapsed)
         _set_status(job_id, status="done", message="Finish positions and grid positions updated.")
+        log.info("finish_complete", job_id=job_id[:8], elapsed=round(elapsed, 2))
 
         try:
             response = httpx.post(FINETUNE_URL, headers={"X-API-KEY": os.getenv("ADMIN_API_KEY")})
             finetune_job_id = response.json().get("job_id")
             _set_status(job_id, finetune_job_id=finetune_job_id, message="Finetune triggered.")
+            log.info("finetune_triggered", job_id=job_id[:8], finetune_job_id=finetune_job_id)
         except Exception as e:
             _set_status(job_id, finetune_warning=f"Finetune trigger failed: {str(e)}")
+            log.error("finetune_trigger_failed", job_id=job_id[:8], error=str(e))
 
 
 
     except Exception as e:
+        INGEST_JOBS_TOTAL.labels(status="error").inc()
+        log.error("finish_failed", job_id=job_id[:8], error=str(e))
         _set_status(job_id, status="error", message=str(e))
 
 
 app = FastAPI(
     title="F1Net Ingest API",
-    description="Fetches FastF1 race data, preprocesses it, and appends to the DVC-tracked dataset.",
+    description="Fetches FastF1 race data, preprocesses it, and appends to the dataset.",
 )
+
+setup_metrics(app, "ingest")
 
 app.add_middleware(
     CORSMiddleware,
@@ -262,10 +253,17 @@ class RoundRequest(BaseModel):
     round: int
 
 
+@app.get("/health")
+def health():
+    uptime = (datetime.datetime.now(datetime.timezone.utc) - START_TIME).total_seconds()
+    return {"status": "healthy", "service": "ingest", "uptime_seconds": round(uptime, 1)}
+
+
 @app.post("/ingest")
 def ingest(request: RoundRequest, background_tasks: BackgroundTasks,_=Security(verify_key)):
     job_id = str(uuid.uuid4())
     job_store[job_id] = {"status": "queued", "message": "Job queued.", "year": request.year, "round": request.round}
+    log.info("ingest_queued", job_id=job_id[:8], year=request.year, round=request.round)
     background_tasks.add_task(fetch_and_process, request.year, request.round, job_id)
     return {"job_id": job_id, "status": "queued"}
 
@@ -274,6 +272,7 @@ def ingest(request: RoundRequest, background_tasks: BackgroundTasks,_=Security(v
 def ingest_finish(request: RoundRequest, background_tasks: BackgroundTasks,_=Security(verify_key)):
     job_id = str(uuid.uuid4())
     job_store[job_id] = {"status": "queued", "message": "Job queued.", "year": request.year, "round": request.round}
+    log.info("finish_queued", job_id=job_id[:8], year=request.year, round=request.round)
     background_tasks.add_task(fill_finish_positions, request.year, request.round, job_id)
     return {"job_id": job_id, "status": "queued"}
 

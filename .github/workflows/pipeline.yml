@@ -1,0 +1,159 @@
+name: F1Net ML Pipeline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly retrain, Monday 2am UTC
+
+env:
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  prepare-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pull raw data from DVC
+        run: dvc pull data/Complete_Driver_Data.csv
+        env:
+          DVC_AUTH_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+
+      - name: Prepare data
+        run: python scripts/prepare_data.py
+
+      - name: Upload cleaned data
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-data
+          path: |
+            data/Complete_Driver_Data.csv
+            config/mappings.json
+            params.yaml
+
+  train:
+    needs: prepare-data
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download prepared data
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-data
+
+      - name: Train model
+        run: python src/training/train.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Upload checkpoints
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-checkpoint
+          path: |
+            checkpoints/f1net_main.pth
+            checkpoints/fisher_info.pkl
+            metrics.json
+
+  evaluate:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download prepared data
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-data
+
+      - name: Download model checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: model-checkpoint
+          path: checkpoints
+
+      - name: Evaluate model
+        run: python scripts/evaluate.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: Upload metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-metrics
+          path: metrics.json
+
+  push-results:
+    needs: evaluate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download model checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: model-checkpoint
+          path: checkpoints
+
+      - name: Download metrics
+        uses: actions/download-artifact@v4
+        with:
+          name: eval-metrics
+
+      - name: Push data to DVC remote
+        run: |
+          dvc add data/Complete_Driver_Data.csv
+          dvc add checkpoints/f1net_main.pth checkpoints/fisher_info.pkl
+          dvc push
+        env:
+          DVC_AUTH_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+
+      - name: Commit metrics to git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add metrics.json config/mappings.json
+          git diff --cached --quiet || git commit -m "pipeline: update metrics [skip ci]"
+          git push

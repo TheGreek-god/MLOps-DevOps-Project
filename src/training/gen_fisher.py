@@ -5,14 +5,7 @@ import os
 import json
 import sys
 import mlflow
-import dagshub
 import pickle
-
-# After running this script, manually run:
-# dvc add checkpoints/fisher_info.pkl
-# git add checkpoints/fisher_info.pkl.dvc
-# git commit -m "update fisher matrix"
-# dvc push
 
 src_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 project_root = os.path.dirname(src_path)
@@ -57,8 +50,7 @@ def calc_fisher(model,loader,lossfn,device):
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dagshub.auth.add_app_token(token=os.getenv("DAGSHUB_TOKEN"))
-    dagshub.init(repo_owner="pranav070904", repo_name='F1Net-V2', mlflow=True)
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
    
     print(mlflow.get_tracking_uri())
     print(mlflow.MlflowClient().get_registered_model("F1NET"))

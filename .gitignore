@@ -12,3 +12,4 @@ checkpoints/*.pkl
 .env.docker
 *.render.Dockerfile
 scripts/.bootstrap_progress.json
+mlflow.db

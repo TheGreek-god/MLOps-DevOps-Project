@@ -1,5 +1,5 @@
 """
-DVC pipeline stage: prepare_data
+Data preparation script.
 Cleans raw fetched data, applies imputation, creates driver/team mappings.
 Input:  data/Complete_Driver_Data.csv (raw, from bootstrap fetch)
 Output: data/Complete_Driver_Data.csv (cleaned), config/mappings.json
