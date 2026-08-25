@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: predict
+  namespace: f1net
+  labels:
+    app: predict
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: predict
+  template:
+    metadata:
+      labels:
+        app: predict
+    spec:
+      containers:
+        - name: predict
+          image: f1net-predict:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: f1net-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: checkpoints
+              mountPath: /app/checkpoints
+            - name: config
+              mountPath: /app/config
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          hostPath:
+            path: /mnt/data
+            type: DirectoryOrCreate
+        - name: checkpoints
+          hostPath:
+            path: /mnt/checkpoints
+            type: DirectoryOrCreate
+        - name: config
+          hostPath:
+            path: /mnt/config
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: predict-svc
+  namespace: f1net
+spec:
+  selector:
+    app: predict
+  ports:
+    - port: 8001
+      targetPort: 8001
+      nodePort: 30081
+  type: NodePort

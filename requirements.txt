@@ -1,8 +1,8 @@
 mlflow
 dagshub
+dvc
 fastf1
 tqdm
-dvc
 hyperopt
 fastapi
 uvicorn
@@ -13,3 +13,6 @@ scipy
 numpy
 pandas
 scikit-learn
+prometheus-client
+prometheus-fastapi-instrumentator
+structlog

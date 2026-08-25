@@ -7,12 +7,23 @@ import pandas as pd
 import json
 from pydantic import BaseModel
 import sys
+import datetime
+import time
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import  numpy as np
 import math
+import structlog
 load_dotenv()
+
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+)
+log = structlog.get_logger("predict")
 
 
 def find_project_root():
@@ -32,11 +43,16 @@ if src_path not in sys.path:
 
 from models.F1Net import F1Net
 from utils.dataLoader import F1NetDataset
+from utils.metrics import (
+    setup_metrics, PREDICT_REQUESTS_TOTAL, PREDICT_DURATION_SECONDS,
+    MODEL_LOADED, MODEL_CHECKPOINT_AGE_INFO,
+)
 
 
 MAPPINGS_PATH = os.path.join(root_path, "config","mappings.json")
 MODEL_CHECKPOINT_PATH = os.path.join(root_path, "checkpoints","f1net_main.pth")
 app_state = {}
+START_TIME = datetime.datetime.now(datetime.timezone.utc)
 
 with open(MAPPINGS_PATH, "r") as f:
         mappings = json.load(f)
@@ -78,27 +94,35 @@ async def lifespan(app: FastAPI):
 
         app_state["model"] = model
         app_state["device"] = device
-        print(f"Using Local checkpoint at {checkpoint_path}")
+        MODEL_LOADED.set(1)
+        mtime = os.path.getmtime(checkpoint_path)
+        age_hours = round((time.time() - mtime) / 3600, 1)
+        MODEL_CHECKPOINT_AGE_INFO.info({"path": checkpoint_path, "age_hours": str(age_hours)})
+        log.info("model_loaded", source="local", path=checkpoint_path, age_hours=age_hours)
 
 
     except Exception as e:
-        print(f"Error Loading model: {e}")
-
+        MODEL_LOADED.set(0)
+        log.error("local_checkpoint_failed", error=str(e))
 
         try:
-            dagshub.auth.add_app_token(token=os.getenv("DAGSHUB_TOKEN"))
-            dagshub.init(repo_owner='pranav070904', repo_name='F1Net-V2', mlflow=True)
-            print("Loading model artifacts.")
+            if os.getenv("DAGSHUB_TOKEN"):
+                dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
+            mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+            log.info("loading_from_mlflow")
             model_uri = "models:/F1NET/latest"
             model = mlflow.pytorch.load_model(model_uri)
             model.to(device)
             model.eval()
             app_state["model"] = model
-            print("Model Loaded")
+            MODEL_LOADED.set(1)
+            log.info("model_loaded", source="mlflow")
 
             
 
         except Exception as e:
+             MODEL_LOADED.set(0)
+             log.error("model_load_failed", error=str(e))
              print("Failed to load model from both MLflow and local checkpoint.")
              raise e
         
@@ -109,13 +133,14 @@ async def lifespan(app: FastAPI):
             with open(MAPPINGS_PATH, "r") as f:
                 app_state["mappings"] = json.load(f)
     except Exception as e:
-        print(f"Error loading dataset: {e}")
+        log.error("mappings_load_failed", error=str(e))
         raise e
     
     yield
 
-    print("Shutting down FastAPI Server Engine process...")
+    log.info("shutting_down")
     app_state.clear()
+    MODEL_LOADED.set(0)
 
 
 app = FastAPI(
@@ -123,6 +148,8 @@ app = FastAPI(
     description = "API for F1Net model predictions",
     lifespan = lifespan
 )
+
+setup_metrics(app, "predict")
 
 app.add_middleware(
     CORSMiddleware,
@@ -132,10 +159,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/health")
+def health():
+    uptime = (datetime.datetime.now(datetime.timezone.utc) - START_TIME).total_seconds()
+    model_loaded = app_state.get("model") is not None
+    return {"status": "healthy" if model_loaded else "degraded", "service": "predict", "model_loaded": model_loaded, "uptime_seconds": round(uptime, 1)}
+
 @app.post("/predict")
 def predict(request:RoundRequest):
+    start = time.time()
     year = request.year
     round_num = request.round_num
+    PREDICT_REQUESTS_TOTAL.inc()
+    log.info("predict_requested", year=year, round=round_num)
 
    
     if(year<2026):
@@ -218,5 +254,8 @@ def predict(request:RoundRequest):
         ]
     }
 
+    elapsed = time.time() - start
+    PREDICT_DURATION_SECONDS.observe(elapsed)
+    log.info("predict_complete", year=year, round=round_num, drivers=len(driver_names), elapsed=round(elapsed, 3))
 
     return response

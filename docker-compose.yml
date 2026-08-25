@@ -11,10 +11,13 @@ services:
       - ./data:/app/data
       - ./cache_folder:/app/cache_folder
       - ./config:/app/config
-      - ./.git:/app/.git
       - ./checkpoints:/app/checkpoints
-      - ./.dvc:/app/.dvc
-      - ./.dvcignore:/app/.dvcignore
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - f1net
 
@@ -30,6 +33,12 @@ services:
       - ./data:/app/data
       - ./checkpoints:/app/checkpoints
       - ./config:/app/config
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - f1net
 
@@ -45,9 +54,12 @@ services:
       - ./data:/app/data
       - ./checkpoints:/app/checkpoints
       - ./config:/app/config
-      - ./.git:/app/.git
-      - ./.dvc:/app/.dvc
-      - ./.dvcignore:/app/.dvcignore
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - f1net
 
@@ -60,8 +72,10 @@ services:
     networks:
       - f1net
     depends_on:
-      - predict
-      - ingest
+      predict:
+        condition: service_healthy
+      ingest:
+        condition: service_healthy
 
 networks:
   f1net:

@@ -11,8 +11,18 @@ from dotenv import load_dotenv
 from fastapi.security import APIKeyHeader
 from fastapi import Security
 import io
+import datetime
+import time
+import structlog
 load_dotenv()
 
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+)
+log = structlog.get_logger("finetune")
 
 
 class CPU_Unpickler(pickle.Unpickler):
@@ -39,23 +49,16 @@ if(src_path not in sys.path):
 from models.F1Net import F1Net
 from models.F1Loss import F1Loss
 from utils.dataLoader import F1NetDataset,collate
+from utils.metrics import (
+    setup_metrics, FINETUNE_JOBS_TOTAL, FINETUNE_DURATION_SECONDS,
+    FINETUNE_SPEARMAN_PRE, FINETUNE_SPEARMAN_POST, FINETUNE_EPOCHS,
+    FINETUNE_LOSS, MODEL_LOADED,
+)
 import mlflow
 import dagshub
 import numpy as np
 from scipy.stats import spearmanr
 import uuid
-import subprocess
-
-github_token = os.getenv("GITHUB_TOKEN")
-github_user = os.getenv("GITHUB_USER")
-if github_token:
-    subprocess.run(["git", "config", "--global", "user.email", "pranav070904@users.noreply.github.com"], cwd=root_path)
-    subprocess.run(["git", "config", "--global", "user.name", "pranav070904"], cwd=root_path)
-    subprocess.run(
-        ["git", "remote", "set-url", "origin", 
-         f"https://{github_user}:{github_token}@github.com/{github_user}/F1Net-V2.git"],
-        cwd=root_path, capture_output=True
-    )
 
 API_KEY = os.getenv("ADMIN_API_KEY")
 api_key_header = APIKeyHeader(name="X-API-KEY")
@@ -63,6 +66,7 @@ MAPPINGS_PATH = os.path.join(root_path,"config","mappings.json")
 MODELS_CHECKPOINT = os.path.join(root_path,"checkpoints","f1net_main.pth")
 FISHER_PATH = os.path.join(root_path,"checkpoints","fisher_info.pkl")
 
+START_TIME = datetime.datetime.now(datetime.timezone.utc)
 
 job_store : dict[str,dict] = {}
 
@@ -73,46 +77,18 @@ def verify_key(key: str = Security(api_key_header)):
 
 def _set_status(job_id:str,**kwargs):
     job_store[job_id].update(kwargs)
-    print(f"[Job {job_id[:8]}] {kwargs.get('message', kwargs.get('status', ''))}")
+    log.info("job_status", job_id=job_id[:8], **{k: v for k, v in kwargs.items() if isinstance(v, (str, int, float, bool))})
 
 
-def _sub_run(job_id: str):
-    dvc = subprocess.run(
-        ["dvc", "add", MODELS_CHECKPOINT],
-        capture_output=True, text=True, cwd=root_path,
-    )
-    git_add = subprocess.run(
-        ["git", "add", f"{MODELS_CHECKPOINT}.dvc"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    git_commit = subprocess.run(
-        ["git", "commit", "-m", "finetune: post-race model update"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    git_push = subprocess.run(
-        ["git", "push", "origin", "main"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    dvc_push = subprocess.run(
-        ["dvc", "push"],
-        capture_output=True, text=True, cwd=root_path
-    )
-    _set_status(job_id, dvc_output=(dvc.stdout + dvc.stderr).strip())
-    _set_status(job_id, git_add_output=(git_add.stdout + git_add.stderr).strip())
-    _set_status(job_id, git_commit_output=(git_commit.stdout + git_commit.stderr).strip())
-    _set_status(job_id, git_push_output=(git_push.stdout + git_push.stderr).strip())
-    if dvc_push.returncode != 0:
-        _set_status(job_id, dvc_push_warning=f"DVC push failed: {dvc_push.stderr.strip()}")
-    else:
-        _set_status(job_id, message="DVC push complete.")
+
 def EWC(model, fixed_params, fisher_mat):
     l = 0
     for name, param in model.named_parameters():
         if name not in fisher_mat:
-            print(f"Missing from fisher_mat: {name}")
+            log.warning("missing_fisher_param", name=name)
             continue
         if name not in fixed_params:
-            print(f"Missing from fixed_params: {name}")
+            log.warning("missing_fixed_param", name=name)
             continue
         l += (fisher_mat[name] * (param - fixed_params[name]).pow(2)).sum()
     return l
@@ -159,15 +135,17 @@ def calc_spearman(model, test_loader, mappings, device, num_races_to_calc=3):
                 corrs.append(corr)
 
 
-    return sum(corrs)/len(corrs)
-
+    return sum(corrs)/len(corrs) if corrs else 0.0
 
 
 def finetune(job_id:str):
+    start = time.time()
     try:
         _set_status(job_id, status="running", message="Starting finetune...")
-        dagshub.auth.add_app_token(token=os.getenv("DAGSHUB_TOKEN"))
-        dagshub.init(repo_owner='pranav070904', repo_name='F1Net-V2', mlflow=True)
+        log.info("finetune_started", job_id=job_id[:8])
+        mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+        if os.getenv("DAGSHUB_TOKEN"):
+            dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
         mlflow.set_experiment("F1Net_Finetune")
 
         _set_status(job_id, message="Loading checkpoint and mappings...")
@@ -189,18 +167,21 @@ def finetune(job_id:str):
         model = F1Net(num_teams = num_teams,num_drivers=num_drivers)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.to(device)
+        MODEL_LOADED.set(1)
 
         _set_status(job_id, message="Building dataset and dataloader...")
         dataset = F1NetDataset(group = "2026")
         window_size = 6
-        start = max(0,len(dataset)-window_size)
-        final_ds = [dataset[i] for i in range(start,len(dataset))]
+        start_idx = max(0,len(dataset)-window_size)
+        final_ds = [dataset[i] for i in range(start_idx,len(dataset))]
         dl = DataLoader(final_ds,batch_size=1,shuffle=False,collate_fn=collate)
 
         losfn = F1Loss()
         optimizer = torch.optim.Adam(model.parameters(),lr = .003)
 
         pre_corrs = calc_spearman(model,dl,mappings,device,num_races_to_calc=window_size)
+        FINETUNE_SPEARMAN_PRE.set(pre_corrs)
+        log.info("spearman_pre", job_id=job_id[:8], spearman=round(pre_corrs, 4))
 
         fixed_params = {}
         for name,param in model.named_parameters():
@@ -228,12 +209,16 @@ def finetune(job_id:str):
                     full_loss.backward()
                     optimizer.step()
 
-            
+                FINETUNE_EPOCHS.inc()
+                FINETUNE_LOSS.set(full_loss.item())
+                log.info("epoch_complete", job_id=job_id[:8], epoch=epoch+1, loss=round(full_loss.item(), 4))
 
-            
+
+
 
             _set_status(job_id, message="Logging metrics")
             post_corrs = calc_spearman(model,dl,mappings,device,num_races_to_calc=window_size)
+            FINETUNE_SPEARMAN_POST.set(post_corrs)
             mlflow.log_metric("Pre_Spearman_Corr",pre_corrs)
             mlflow.log_metric("Post_Spearman_Corr",post_corrs)
             mlflow.log_param("EWC_Lam",lam)
@@ -256,9 +241,15 @@ def finetune(job_id:str):
             }
             torch.save(state_payload,MODELS_CHECKPOINT)
             _set_status(job_id, message="Checkpoint Saved and model logged")
-            _sub_run(job_id)
+
+            elapsed = time.time() - start
+            FINETUNE_DURATION_SECONDS.observe(elapsed)
+            FINETUNE_JOBS_TOTAL.labels(status="success").inc()
             _set_status(job_id, status="done", message="Finetune complete.")
+            log.info("finetune_complete", job_id=job_id[:8], spearman_pre=round(pre_corrs, 4), spearman_post=round(post_corrs, 4), elapsed=round(elapsed, 2))
     except Exception as e:
+        FINETUNE_JOBS_TOTAL.labels(status="error").inc()
+        log.error("finetune_failed", job_id=job_id[:8], error=str(e))
         _set_status(job_id, status="error", message=str(e))
 
 
@@ -271,13 +262,19 @@ app = FastAPI(
 
 )
 
+setup_metrics(app, "finetune")
 
 
+@app.get("/health")
+def health():
+    uptime = (datetime.datetime.now(datetime.timezone.utc) - START_TIME).total_seconds()
+    return {"status": "healthy", "service": "finetune", "uptime_seconds": round(uptime, 1)}
 
 @app.post("/finetune")
 def finetune_endpoint(background_tasks:  BackgroundTasks,_=Security(verify_key)):
     job_id = str(uuid.uuid4())
     job_store[job_id] = {"status":"queued","message":"Job Queued"}
+    log.info("finetune_queued", job_id=job_id[:8])
     background_tasks.add_task(finetune,job_id)
     return {"job_id":job_id,"status":"queued"}
 

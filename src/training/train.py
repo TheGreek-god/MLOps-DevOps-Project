@@ -318,8 +318,9 @@ def train_model():
     
 
 if __name__ == "__main__":
-    dagshub.auth.add_app_token(token=os.getenv("DAGSHUB_TOKEN"))
-    dagshub.init(repo_owner='pranav070904', repo_name='F1Net-V2', mlflow=True)
+    mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+    if os.getenv("DAGSHUB_TOKEN"):
+        dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
     mlflow.set_experiment("F1Net_Fisher")
 
     # space = {

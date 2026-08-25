@@ -11,3 +11,4 @@ checkpoints/*.pkl
 .env
 .env.docker
 *.render.Dockerfile
+scripts/.bootstrap_progress.json
