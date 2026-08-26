@@ -1,9 +1,9 @@
 name: F1Net ML Pipeline
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-  schedule:
-    - cron: '0 2 * * 1'  # Weekly retrain, Monday 2am UTC
 
 env:
   PYTHON_VERSION: '3.10'
@@ -117,7 +117,7 @@ jobs:
   push-results:
     needs: evaluate
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'push'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
