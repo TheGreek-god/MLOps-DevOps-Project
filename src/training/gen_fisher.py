@@ -105,8 +105,8 @@ if __name__ == '__main__':
         mlflow.pytorch.log_model(
             pytorch_model=model,
             artifact_path="f1net_model",
-            registered_model_name="F1NET"
-
+            registered_model_name="F1NET",
+            serialization_format="pickle"
         )
 
         print("\nModel Logged and Saved")

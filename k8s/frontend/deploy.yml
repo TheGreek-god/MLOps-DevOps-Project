@@ -19,6 +19,11 @@ spec:
         - name: frontend
           image: f1net-frontend:latest
           imagePullPolicy: Never
+          env:
+            - name: PREDICT_API_URL
+              value: "http://localhost:30081"
+            - name: INGEST_URL
+              value: "http://localhost:8000"
           ports:
             - containerPort: 80
           livenessProbe:

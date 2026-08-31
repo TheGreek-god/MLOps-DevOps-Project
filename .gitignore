@@ -13,3 +13,8 @@ checkpoints/*.pkl
 *.render.Dockerfile
 scripts/.bootstrap_progress.json
 mlflow.db
+
+# build & run logs (never commit)
+*.log
+*.log.1
+*.log.*

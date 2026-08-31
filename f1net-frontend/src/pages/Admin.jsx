@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import axios from 'axios'
 
-const INGEST_BASE = import.meta.env.VITE_INGEST_URL || 'http://localhost:8000'
+const INGEST_BASE = ''
 
 export default function Admin() {
   const [year, setYear] = useState(2026)

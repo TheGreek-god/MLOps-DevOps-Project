@@ -1,0 +1,4 @@
+window.__RUNTIME_CONFIG__ = {
+  PREDICT_API_URL: "${PREDICT_API_URL}",
+  INGEST_URL: "${INGEST_URL}",
+}

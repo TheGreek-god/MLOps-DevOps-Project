@@ -61,13 +61,21 @@ class F1NetDataset(Dataset):
 
         historical_races = sorted(list(unified.groupby(["Year", "Round"])), key=lambda x: x[0])
         races_2026 = sorted(list(df_2026.groupby(["Year", "Round"])), key=lambda x: x[0])
-        
-        split_idx = int(len(historical_races)*self.train_size)
+
+        if not historical_races:
+            split_idx = int(len(races_2026) * self.train_size)
+            split_idx = max(1, min(split_idx, len(races_2026) - 1))
+            train_races = races_2026[:split_idx]
+            test_races = races_2026[split_idx:]
+        else:
+            split_idx = int(len(historical_races)*self.train_size)
+            train_races = historical_races[:-2]
+            test_races = historical_races[-2:]
 
         if self.group == 'train':
-            self.race_groups = historical_races[:-2]
+            self.race_groups = train_races
         elif self.group == 'test':
-            self.race_groups = historical_races[-2:]
+            self.race_groups = test_races
         elif self.group == '2026':
             self.race_groups = races_2026
         else:

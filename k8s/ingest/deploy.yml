@@ -29,8 +29,6 @@ spec:
               mountPath: /app/data
             - name: cache
               mountPath: /app/cache_folder
-            - name: config
-              mountPath: /app/config
             - name: checkpoints
               mountPath: /app/checkpoints
           livenessProbe:
@@ -64,10 +62,6 @@ spec:
         - name: cache
           hostPath:
             path: /mnt/cache_folder
-            type: DirectoryOrCreate
-        - name: config
-          hostPath:
-            path: /mnt/config
             type: DirectoryOrCreate
         - name: checkpoints
           hostPath:

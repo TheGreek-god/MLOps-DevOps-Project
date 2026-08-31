@@ -106,11 +106,14 @@ async def lifespan(app: FastAPI):
         log.error("local_checkpoint_failed", error=str(e))
 
         try:
-            if os.getenv("DAGSHUB_TOKEN"):
-                dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
-            mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+            tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+            if tracking_uri.startswith(("http://localhost", "http://127.0.0.1")):
+                if os.getenv("DAGSHUB_TOKEN"):
+                    dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
+                    tracking_uri = mlflow.get_tracking_uri()
+            mlflow.set_tracking_uri(tracking_uri)
             log.info("loading_from_mlflow")
-            model_uri = "models:/F1NET/latest"
+            model_uri = "models:/F1NET/prod"
             model = mlflow.pytorch.load_model(model_uri)
             model.to(device)
             model.eval()

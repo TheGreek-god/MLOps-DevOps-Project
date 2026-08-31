@@ -143,9 +143,12 @@ def finetune(job_id:str):
     try:
         _set_status(job_id, status="running", message="Starting finetune...")
         log.info("finetune_started", job_id=job_id[:8])
-        mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
-        if os.getenv("DAGSHUB_TOKEN"):
-            dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+        if tracking_uri.startswith(("http://localhost", "http://127.0.0.1")):
+            if os.getenv("DAGSHUB_TOKEN"):
+                dagshub.init(repo_owner="TheGreek-god", repo_name="MLOps-DevOps-Project")
+                tracking_uri = mlflow.get_tracking_uri()
+        mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment("F1Net_Finetune")
 
         _set_status(job_id, message="Loading checkpoint and mappings...")
@@ -227,12 +230,13 @@ def finetune(job_id:str):
             mlflow.pytorch.log_model(
                 pytorch_model=model,
                 name = "f1net_model",
-                registered_model_name="F1NET"
+                registered_model_name="F1NET",
+                serialization_format="pickle"
             )
 
             client = mlflow.MlflowClient()
             latest_version = client.get_latest_versions("F1NET")[-1].version
-            client.set_registered_model_alias("F1NET", "latest", version=latest_version)
+            client.set_registered_model_alias("F1NET", "prod", version=latest_version)
 
 
             state_payload = {

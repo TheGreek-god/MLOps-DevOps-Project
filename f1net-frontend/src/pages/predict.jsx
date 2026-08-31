@@ -3,20 +3,20 @@ import axios from 'axios'
 import Podium from '../components/Podium'
 import ResultsTable from '../components/ResultsTable'
 
-const API_BASE = import.meta.env.VITE_PREDICT_API_URL
+const API_BASE = ''
 
 const teamColors = {
   'Mercedes': '#00D2BE',
-  'Red Bull Racing': '#0600EF',
+  'Red Bull': '#0600EF',
   'Ferrari': '#DC0000',
   'McLaren': '#FF8700',
   'Aston Martin': '#229971',
   'Alpine': '#0090FF',
   'Williams': '#005AFF',
-  'Haas': '#B6BABD',
-  'Kick Sauber': '#52E252',
-  'RB': '#6692FF',
-  'Cadillac': '#C8A951',
+  'Haas F1 Team': '#B6BABD',
+  'Audi': '#52E252',
+  'RB F1 Team': '#6692FF',
+  'Cadillac F1 Team': '#C8A951',
 }
 
 export default function Predict() {
